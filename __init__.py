@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Wiggle Bone",
     "author": "Steve Miller",
-    "version": (1, 4, 3),
+    "version": (1, 5, 0),
     "blender": (2, 80, 0),
     "location": "Properties > Bone",
     "description": "Simulates simple jiggle physics on bones",
@@ -13,28 +13,81 @@ bl_info = {
 import bpy, math, mathutils
 from mathutils import Vector, Matrix, Euler, Quaternion
 from bpy.app.handlers import persistent
+import json
 
 skip = False
 render = False
+curframe = None
+skip_jiggle = False
+skip_handler = False
 
-# returns name of parent in jiggle list or None
-def check_parent(b, list):
-    if list.find(b.name) >= 0:
-        return b.name
-    else:
-        if b.parent:
-            return check_parent(b.parent, list)
+######## NEW STUFF STARTS ############################################
+# Consider replacing generic python object with an actual node that doesn't need to be converted to dict on each access:
+# class Jiggle_Node(bpy.types.PropertyGroup):
+#   name: bpy.props.StringProperty()
+#   children: bpy.props.CollectionProperty(type=Jiggle_Node)
+#   bones: bpy.props.CollectionProperty(type=Jiggle_Node)
+#   type: bpy.props.StringProperty() - is this necessary?
+
+
+def find_parent(item, nodes):
+    if item.parent:
+        if item.parent.name in nodes:
+            return item.parent
         else:
-            return None
+            return find_parent(item.parent, nodes)
+    else:
+        return None
 
 
-def treeprint(forest, list):
-    for tree in forest:
-        print(tree["name"])
-        item = list.add()
-        item.name = tree["name"]
-        if "children" in tree:
-            treeprint(tree["children"], list)
+def generate_jiggle_tree_bones(ob):
+    print("GENERATING BONES FOR: " + ob.name)
+    nodes = {}
+
+    for b in ob.pose.bones:
+        if b.jiggle_enable:
+            nodes[b.name] = {"children": {}, "type": "BONE"}
+            b["jiggle_mat"] = b.id_data.matrix_world @ b.matrix
+    tree = {}
+    for bone_node in nodes:
+        parent = find_parent(ob.pose.bones[bone_node], nodes)
+        if parent:
+            nodes[parent.name]["children"][bone_node] = nodes[bone_node]
+        else:
+            tree[bone_node] = nodes[bone_node]
+    # print(tree)
+    return tree
+
+
+def generate_jiggle_tree():
+    # iterate through all objects and construct jiggle collider master list
+    print("REFRESH JIGGLE LIST")
+
+    nodes = {}
+    # iterate through objects
+    for ob in bpy.context.scene.objects:
+        if ob.type == "ARMATURE" and ob.data.jiggle_enable:
+            nodes[ob.name] = {
+                "children": {},
+                "type": "OBJECT",
+                "bones": generate_jiggle_tree_bones(ob),
+            }
+    # print(nodes)
+
+    tree = {}
+    for ob_node in nodes:
+        parent = find_parent(bpy.data.objects[ob_node], nodes)
+        if parent:
+            nodes[parent.name]["children"][ob_node] = nodes[ob_node]
+        else:
+            tree[ob_node] = nodes[ob_node]
+
+    bpy.context.scene["jiggle_tree"] = tree  # json.dumps(tree)
+
+
+##################### NEW STUFF ENDS ##################################
+def update_tree(self, context):
+    generate_jiggle_tree()
 
 
 def jiggle_list_refresh_ui(self, context):
@@ -57,6 +110,7 @@ def jiggle_list_refresh_ui(self, context):
                 else:
                     b["rot_start"] = b.rotation_euler.copy()
                 b["loc_start"] = b.location.copy()
+                b["scale_start"] = b.scale.copy()
 
     # apply to other selected colliders:
     a = bpy.context.active_object
@@ -66,60 +120,72 @@ def jiggle_list_refresh_ui(self, context):
                 b.jiggle_collider_enable = a.jiggle_collider_enable
 
     # iterate through all objects and construct jiggle collider master list
-    bpy.context.scene.jiggle_collider_list.clear()
-    for ob in bpy.context.scene.objects:
-        if ob.type == "EMPTY" and ob.jiggle_collider_enable:
-            item = bpy.context.scene.jiggle_collider_list.add()
-            item.name = ob.name
+    print("REFRESH LIST")
+    generate_jiggle_tree()
+    #    bpy.context.scene.jiggle_collider_list.clear()
+    #    for ob in bpy.context.scene.objects:
+    #        if ob.type == 'EMPTY' and ob.jiggle_collider_enable:
+    #            item = bpy.context.scene.jiggle_collider_list.add()
+    #            item.name = ob.name
+    #
+    #    #iterate through all objects and bones to construct jiggle lists
+    #    bpy.context.scene.jiggle_list.clear()
+    #    for ob in bpy.context.scene.objects:
+    #        if ob.type == 'ARMATURE' and ob.data.jiggle_enable:
+    #            ob.jiggle_list.clear()
+    #            for b in ob.pose.bones:
+    #                if b.jiggle_enable:
+    #                    item=ob.jiggle_list.add()
+    #                    item.name = b.name
+    #                    b['jiggle_mat']=b.id_data.matrix_world @ b.matrix
+    #
+    #                    #add colliders
+    #                    b.jiggle_collider_list.clear()
+    #                    for c in bpy.context.scene.jiggle_collider_list:
+    #                        c = bpy.context.scene.objects[c.name]
+    #                        c_item=b.jiggle_collider_list.add()
+    #                        c_item.name = c.name
+    #                        c_item.theta_last = 0
+    #                        c_item.dir_last = 0
+    #                    #print("added %s" %b.name)
+    #            #sort bone list so parent bones are processed before child bones
+    #            nodes = {}
+    #            for item in ob.jiggle_list:
+    #                nodes[item.name] = {'name':item.name}
+    #
+    #            forest = []
+    #            for item in ob.jiggle_list:
+    #                node = nodes[item.name]
+    #                parent_name = None
+    #                if ob.pose.bones[item.name].parent:
+    #                    parent_name = check_parent(ob.pose.bones[item.name].parent, ob.jiggle_list)
+    #                if parent_name: #item has a parent in the list
+    #                    parent = nodes[parent_name]
+    #                    if not 'children' in parent:
+    #                        parent['children'] = []
+    #                    children = parent['children']
+    #                    children.append(node)
+    #                else:
+    #                    forest.append(node)
+    #
+    #            ob.jiggle_list.clear()
+    #            treeprint(forest,ob.jiggle_list)
+    #
+    #            if ob.jiggle_list:
+    #                item=bpy.context.scene.jiggle_list.add()
+    #                item.name = ob.name
+    skip = False
 
-    # iterate through all objects and bones to construct jiggle lists
-    bpy.context.scene.jiggle_list.clear()
-    for ob in bpy.context.scene.objects:
-        if ob.type == "ARMATURE" and ob.data.jiggle_enable:
-            ob.jiggle_list.clear()
-            for b in ob.pose.bones:
-                if b.jiggle_enable:
-                    item = ob.jiggle_list.add()
-                    item.name = b.name
-                    b["jiggle_mat"] = b.id_data.matrix_world @ b.matrix
 
-                    # add colliders
-                    b.jiggle_collider_list.clear()
-                    for c in bpy.context.scene.jiggle_collider_list:
-                        c = bpy.context.scene.objects[c.name]
-                        c_item = b.jiggle_collider_list.add()
-                        c_item.name = c.name
-                        c_item.theta_last = 0
-                        c_item.dir_last = 0
-                    # print("added %s" %b.name)
-            # sort bone list so parent bones are processed before child bones
-            nodes = {}
-            for item in ob.jiggle_list:
-                nodes[item.name] = {"name": item.name}
-
-            forest = []
-            for item in ob.jiggle_list:
-                node = nodes[item.name]
-                parent_name = None
-                if ob.pose.bones[item.name].parent:
-                    parent_name = check_parent(
-                        ob.pose.bones[item.name].parent, ob.jiggle_list
-                    )
-                if parent_name:  # item has a parent in the list
-                    parent = nodes[parent_name]
-                    if not "children" in parent:
-                        parent["children"] = []
-                    children = parent["children"]
-                    children.append(node)
-                else:
-                    forest.append(node)
-
-            ob.jiggle_list.clear()
-            treeprint(forest, ob.jiggle_list)
-
-            if ob.jiggle_list:
-                item = bpy.context.scene.jiggle_list.add()
-                item.name = ob.name
+def active_update(self, context):
+    global skip
+    if skip:
+        return
+    skip = True
+    a = bpy.context.active_pose_bone
+    for b in bpy.context.selected_pose_bones:
+        if not b == a:
+            b.jiggle_active = a.jiggle_active
     skip = False
 
 
@@ -241,341 +307,351 @@ def relative_vector(m1, m2):
     return vec
 
 
-def collide_bone(c_item, b, eulerRot):
-    print(b.name)
-    # possibly collision groups should be definable per object for localized performance
-    c = bpy.data.objects[c_item.name]
-    print("COLLIDER: " + c.name)
+# def collide_bone(c_item, b, eulerRot):
+#    print(b.name)
+#    #possibly collision groups should be definable per object for localized performance
+#    c = bpy.data.objects[c_item.name]
+#    print('COLLIDER: ' + c.name)
+#
+#    try :
+#        c_last = Matrix(c['last'])
+#    except:
+#        c_last = c.matrix_world.copy()
+#        c['last'] = c_last
 
-    try:
-        c_last = Matrix(c["last"])
-    except:
-        c_last = c.matrix_world.copy()
-        c["last"] = c_last
+#    r = c.empty_display_size * c.scale.x#display size includes world scaling
+#    #this is incorrect, this size is empty size only and unchanging. somehow scaling is being accounted for elsewhere!
+#    print('r:  ' + str(r))
+#
+#    m_next = b.id_data.matrix_world @ b.matrix @ eulerRot.to_matrix().to_4x4()
 
-    r = c.empty_display_size * c.scale.x  # display size includes world scaling
-    # this is incorrect, this size is empty size only and unchanging. somehow scaling is being accounted for elsewhere!
-    print("r:  " + str(r))
+#    #try to calculate vec of motion (both location and rotation of head?) in m_next space
+#    m_last = Matrix(b['jiggle_mat'])
+#
+#    #alternate approach to better capture relative rotations
+#    prev=Matrix.Translation(Matrix(c['last']).translation).inverted() @ m_last
+#    nex = Matrix.Translation(c.matrix_world.translation).inverted() @ m_next
+#    vec = relative_vector(nex @ Matrix.Translation((0,b.length,0)),prev @ Matrix.Translation((0,b.length,0)))
+#    print('vec_2: ' + str(vec))
+#    #vec = vec_2
+#
+#    #now make a bone y rotation so local x points in the direction of motion
+#    #????????? currently this doesn't handle division by zero case
+#    theta_vec = math.atan(vec.z/vec.x)
+#    if vec.x < 0:
+#        if vec.z < 0:
+#            theta_vec = theta_vec - math.radians(180)
+#        else:
+#            theta_vec = theta_vec + math.radians(180)
+#    print('theta_vec: ' + str(math.degrees(-theta_vec)))
+#    m_vec = m_next @ Euler((0,-theta_vec,0)).to_matrix().to_4x4()
+#
+#    #get a circle slice of the sphere along that x axis, if it exists
+#    d_sphere = relative_vector(m_vec, Matrix.Translation(c.matrix_world.translation))
+#    print('d_sphere: ' + str(d_sphere))
+#    d_slice = Vector((d_sphere.x,d_sphere.y)) #projection slice location
 
-    m_next = b.id_data.matrix_world @ b.matrix @ eulerRot.to_matrix().to_4x4()
+#    if abs(d_sphere.z) < r: #slice exists along radius
+#        #r_slice = r * math.cos(d_sphere.z/r)
+#        r_slice = math.sqrt(r*r-d_sphere.z*d_sphere.z)
+#        print('r slice: ' + str(r_slice))
+#        #d_sphere.z component can be used as an additional slippage rotation (when its zero its right on the centre and wouldn't slip)
+#    else:
+#        print('no slice')
+#        r_slice = None
+#
+#    #need to store a persistent dir_last so colliding direction is maintained
+#    try:
+#        dir_last = c_item.dir_last
+#    except:
+#        c_item.dir_last = 0
+#        dir_last = c_item.dir_last
+#
+#    try:
+#        theta_last = c_item.theta_last
+#    except:
+#        c_item.theta_last = theta_vec
+#        theta_last = c_item.theta_last
+#
+#    #print('theta v last: ' + str(math.degrees(b['theta_v_last'])))
+#    print('theta last: ' + str(math.degrees(theta_last)))
+#    #which way would next collide
+#    dir_next = d_slice.x/abs(d_slice.x)
+#
+#
+#    #try to find crossing
+#    tip_next = (m_next @ Matrix.Translation((0,b.length,0))).to_translation()
+#    tip_last = (m_last @ Matrix.Translation((0,b.length,0))).to_translation()
+#
+#    #we want 3 values, P1,P2 line segment and P3 collision
+#    #P2 should be relative change to collider (potentially animated) so its always at c_last position
+#    P1 = tip_last
+#    P2 = tip_next - (c.matrix_world-c_last).to_translation()
+#    P3 = c_last.to_translation()
+##    print(P1)
+##    print(P2)
+##    print(P3)
+#
+#    #find 'u' distance along line P1,P2 that is closest to P3:
+#    u = False
+#    if (P2-P1).length:
+#        #u = ((P3.x-P1.x)*(P2.x-P1.x)+(P3.y-P1.y)*(P2.y-P1.y)+(P3.z-P1.z)*(P2.z-P1.z))/(P2-P1).length
+#        u = ((P3.x-P1.x)*(P2.x-P1.x)+(P3.y-P1.y)*(P2.y-P1.y)+(P3.z-P1.z)*(P2.z-P1.z))/((P2.x-P1.x)*(P2.x-P1.x)+(P2.y-P1.y)*(P2.y-P1.y)+(P2.z-P1.z)*(P2.z-P1.z))
+#
+#    print('new cross test: ' + str(u))
+#
+#    crossed = False
+#    if 0 < u and u < 1:
+#        #bone crosses sphere
+#        #get P4 and u along P1P2 and see if its intersecting at its crossing
+#        P4 = P1 + u*(P2-P1)
+#        if abs((P4 - P3).length) < r:
+#            crossed = True
+#            print('new crossing intersection!!!!')
+#
+#    #now we should do cases:
+#
+#    if dir_last:
+#        if crossed: #there was a crossing intersection between last and next
+#            dir = dir_last
+#            #try compare theta and theta last?
+#            #if theta_vec * b['theta_v_last'] < 0: #they swapped
+#            #if math.degrees(abs(theta_vec - b['theta_v_last'])) > 90:
+#            if math.degrees(abs(theta_vec - theta_last)) > 90:
+#                dir = -dir
+#                print('should i flip?')
+#        else:
+#            if (dir_last * dir_next) > 0: #direction has stayed the same
+#                dir = dir_last
+#            else: #direction switched but there was no crossing
+#                dir = dir_next
+#    else: #no previous frame
+#        dir = dir_next
+#
+#    c_item.theta_last = theta_vec
+#
+#    #store dir for next time
+#    c_item.dir_last = dir
+#
+#    print('dir %d' %dir)
+#
+#    d = d_slice
+#    r = r_slice
+#    theta = theta_vec
+#
+#    if r:
+#        #scale radius with distance to have a margin that avoids b barely touching surface
+#        margin = r*b.jiggle_collision_margin
+#        factor = max(0,min((d.length-b.length)/(r+margin),1))
+#        r = r + margin*factor
+#        print('r: %f' %r)
+#
+#        #could m_next collide?
+#        if (d.length < b.length + r) and (d.length > r): #include no collision if bone is inside collider
+#            #find collision in dir
+#
+#            #tangent intersect:
+#            #a lot of ifs could probably be made more elegant, but works for now
+#            if (d.length*d.length < r*r + b.length*b.length):
+#                print('along length')
+#                r2 = math.asin(r/d.length)#always positive
 
-    # try to calculate vec of motion (both location and rotation of head?) in m_next space
-    m_last = Matrix(b["jiggle_mat"])
+#                #the collider is "in front" of the bone
+#                if d.y < 0:
+#                    if d.x < 0:
+#                        print('below')
+#                        if dir < 0:
+#                            print('neg')
+#                            r1= -math.atan(d.x/d.y)+r2
+#                        else:
+#                            print('pos')
+#                            r1= math.radians(360)-math.atan(d.x/d.y)-r2
+#                        #r1= r1+r2
+#                    else:
+#                        print('above')
+#                        if dir > 0:
+#                            print('pos')
+#                            r1= -math.atan(d.x/d.y)-r2
+#                        else:
+#                            print('neg')
+#                            if crossed:
+#                                r1= -math.atan(d.x/d.y)+r2
+#                            else:
+#                                r1 = -math.atan(d.x/d.y)+r2-math.radians(360)
+#                        #r1= r1-r2
+#
+#                #the collider is "behind" the bone
+#                else:
+#                    if d.x < 0:
+#                        print('belo') #negative
+#                        if dir < 0:
+#                            print('neg')
+#                            r1= -math.radians(180)-math.atan(d.x/d.y)+r2
+#                        else:
+#                            print('pos')
+#                            r1= math.radians(180)-math.atan(d.x/d.y)-r2
 
-    # alternate approach to better capture relative rotations
-    prev = Matrix.Translation(Matrix(c["last"]).translation).inverted() @ m_last
-    nex = Matrix.Translation(c.matrix_world.translation).inverted() @ m_next
-    vec = relative_vector(
-        nex @ Matrix.Translation((0, b.length, 0)),
-        prev @ Matrix.Translation((0, b.length, 0)),
-    )
-    print("vec_2: " + str(vec))
-    # vec = vec_2
+#                    else:
+#                        print('abov') #positive
+#                        if dir > 0:
+#                            print('pos')
+#                            r1= math.radians(180)-math.atan(d.x/d.y)-r2
+#                        else:
+#                            print('neg')
+#                            if crossed:
+#                                r1=-math.atan(d.x/d.y)+r2+math.radians(180)
+#                            else:
+#                                r1=-math.atan(d.x/d.y)+r2-math.radians(180)
 
-    # now make a bone y rotation so local x points in the direction of motion
-    # ????????? currently this doesn't handle division by zero case
-    theta_vec = math.atan(vec.z / vec.x)
-    if vec.x < 0:
-        if vec.z < 0:
-            theta_vec = theta_vec - math.radians(180)
-        else:
-            theta_vec = theta_vec + math.radians(180)
-    print("theta_vec: " + str(math.degrees(-theta_vec)))
-    m_vec = m_next @ Euler((0, -theta_vec, 0)).to_matrix().to_4x4()
+#                #print(math.degrees(r1))
+#
+#            #tip intersect
+#            else:
+#                print('at tip')
+#                #print(d)
+#                #difference of squares goes here
+#                r1 = -dir*math.acos((b.length*b.length + d.length*d.length - r*r)/(2*b.length*d.length)) - math.atan(d.x/d.y)
+#                if d.y > 0:
+#                    if crossed:
+#                        r1 = r1 - math.radians(180)*dir
+#                else:
+#                    if not crossed:
+#                        r1 = r1
+#                #print(math.degrees(r1))
+#
+#            print('r1: ' + str(math.degrees(r1)))
+#            #if slip = 0, r1 stays the same
+#            #if 0 < slip <= 1:
+#                #if d_sphere.z = 0, r1 stays the same, there's no sideways direction to slip
+#                #else as abs(d_sphere.z) approaches r, after r1 rotation, rotate on the spot to the tangent of the sphere, and unrotate by r1 * slip for it sliding out along the tangent
+#            r_sphere = c.empty_display_size * c.scale.x
+#            r1x = r1-((1-b.jiggle_collision_friction)*r1*d_sphere.z*d_sphere.z)/(r_sphere*r_sphere)
+#            r1z = ((1-b.jiggle_collision_friction)*r1*d_sphere.z*r_slice)/(r_sphere*r_sphere)
+#
+#            #verify this math works... can you just add the two rotations like this?
+#            rx = r1x*math.cos(theta)
+#            rz = r1x*math.sin(theta)
+#            rx2 = r1z*math.sin(theta)
+#            rz2 = r1z*math.cos(theta)
+#            rx = rx + rx2
+#            rz = rz - rz2
+#
+#
+#            print('x: %f z: %f' %(math.degrees(rx), math.degrees(rz)))
+#
+#            #return appropriate value
+#            d_head = math.sqrt((-d.y-b.length)*(-d.y-b.length)+d.x*d.x)
+#            if crossed:
+#                print('crossing collision')
+#                #return Euler((0,0,r1))
+#                if b["r_max"]:
+#                    if abs(r1) < abs(b["r_max"]):
+#                        return None
+#                b["c_largest"] = c.name
+#                b["r_max"] = r1
+#                return Euler((-rz,0,rx))
 
-    # get a circle slice of the sphere along that x axis, if it exists
-    d_sphere = relative_vector(m_vec, Matrix.Translation(c.matrix_world.translation))
-    print("d_sphere: " + str(d_sphere))
-    d_slice = Vector((d_sphere.x, d_sphere.y))  # projection slice location
+#                #rot_collision = Euler((-rz,0,rx))
+#            elif ((d_head < r) or ((abs(d.x) < r) and (abs(d.y) < b.length) and (d.y < 0))):
+#                print('collides')
+#                #return Euler((0,0,r1))
+#                if b["r_max"]:
+#                    if abs(r1) < abs(b["r_max"]):
+#                        return None
+#                b["c_largest"] = c.name
+#                b["r_max"] = r1
+#                return Euler((-rz,0,rx))
 
-    if abs(d_sphere.z) < r:  # slice exists along radius
-        # r_slice = r * math.cos(d_sphere.z/r)
-        r_slice = math.sqrt(r * r - d_sphere.z * d_sphere.z)
-        print("r slice: " + str(r_slice))
-        # d_sphere.z component can be used as an additional slippage rotation (when its zero its right on the centre and wouldn't slip)
+#                #rot_collision = Euler((-rz,0,rx))
+#            else:
+#                print('no collision happens') #can collide but doesn't
+#                #b['dir_last'] = dir_next
+#                c_item.dir_last = dir_next
+#                return None
+#
+#        if (d.length < r):
+#            print('base inside')
+#        print('no collision possible')
+#        #b['dir_last'] = dir_next
+#        c_item.dir_last = dir_next
+#        return None #m_next can't collide
+#    print('no r_slice')
+#    return None
+
+
+def reset_bone(b):
+    # jiggle_bone_pre(b)
+    # bpy.context.view_layer.update()
+    b.jiggle_spring = (
+        b.jiggle_spring2
+    ) = b.jiggle_velocity = b.jiggle_velocity2 = Vector((0, 0, 0))
+    # b['jiggle_mat']=b.id_data.matrix_world @ b.matrix
+    bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+
+######## NEW STUFF STARTS #######################################################################
+
+
+def jiggle_bone_pre(b):
+    # b.scale.y = Vector(b['scale_start']).y
+    if b.rotation_mode == "QUATERNION":
+        try:
+            b.rotation_quaternion = Euler(b["rot_start"]).to_quaternion()
+        except:
+            b["rot_start"] = b.rotation_quaternion.copy().to_euler()
     else:
-        print("no slice")
-        r_slice = None
-
-    # need to store a persistent dir_last so colliding direction is maintained
+        try:
+            b.rotation_euler = Euler(b["rot_start"])
+        except:
+            b["rot_start"] = b.rotation_euler.copy()
+    if b.jiggle_translation != 0:
+        try:
+            b.location = b["loc_start"]
+        except:
+            b["loc_start"] = b.location.copy()
     try:
-        dir_last = c_item.dir_last
+        b.scale = b["scale_start"]
     except:
-        c_item.dir_last = 0
-        dir_last = c_item.dir_last
-
+        b["scale_start"] = b.scale.copy()
     try:
-        theta_last = c_item.theta_last
+        test = b["rot1"]
     except:
-        c_item.theta_last = theta_vec
-        theta_last = c_item.theta_last
-
-    # print('theta v last: ' + str(math.degrees(b['theta_v_last'])))
-    print("theta last: " + str(math.degrees(theta_last)))
-    # which way would next collide
-    dir_next = d_slice.x / abs(d_slice.x)
-
-    # try to find crossing
-    tip_next = (m_next @ Matrix.Translation((0, b.length, 0))).to_translation()
-    tip_last = (m_last @ Matrix.Translation((0, b.length, 0))).to_translation()
-
-    # we want 3 values, P1,P2 line segment and P3 collision
-    # P2 should be relative change to collider (potentially animated) so its always at c_last position
-    P1 = tip_last
-    P2 = tip_next - (c.matrix_world - c_last).to_translation()
-    P3 = c_last.to_translation()
-    #    print(P1)
-    #    print(P2)
-    #    print(P3)
-
-    # find 'u' distance along line P1,P2 that is closest to P3:
-    u = False
-    if (P2 - P1).length:
-        # u = ((P3.x-P1.x)*(P2.x-P1.x)+(P3.y-P1.y)*(P2.y-P1.y)+(P3.z-P1.z)*(P2.z-P1.z))/(P2-P1).length
-        u = (
-            (P3.x - P1.x) * (P2.x - P1.x)
-            + (P3.y - P1.y) * (P2.y - P1.y)
-            + (P3.z - P1.z) * (P2.z - P1.z)
-        ) / (
-            (P2.x - P1.x) * (P2.x - P1.x)
-            + (P2.y - P1.y) * (P2.y - P1.y)
-            + (P2.z - P1.z) * (P2.z - P1.z)
-        )
-
-    print("new cross test: " + str(u))
-
-    crossed = False
-    if 0 < u and u < 1:
-        # bone crosses sphere
-        # get P4 and u along P1P2 and see if its intersecting at its crossing
-        P4 = P1 + u * (P2 - P1)
-        if abs((P4 - P3).length) < r:
-            crossed = True
-            print("new crossing intersection!!!!")
-
-    # now we should do cases:
-
-    if dir_last:
-        if crossed:  # there was a crossing intersection between last and next
-            dir = dir_last
-            # try compare theta and theta last?
-            # if theta_vec * b['theta_v_last'] < 0: #they swapped
-            # if math.degrees(abs(theta_vec - b['theta_v_last'])) > 90:
-            if math.degrees(abs(theta_vec - theta_last)) > 90:
-                dir = -dir
-                print("should i flip?")
-        else:
-            if (dir_last * dir_next) > 0:  # direction has stayed the same
-                dir = dir_last
-            else:  # direction switched but there was no crossing
-                dir = dir_next
-    else:  # no previous frame
-        dir = dir_next
-
-    c_item.theta_last = theta_vec
-
-    # store dir for next time
-    c_item.dir_last = dir
-
-    print("dir %d" % dir)
-
-    d = d_slice
-    r = r_slice
-    theta = theta_vec
-
-    if r:
-        # scale radius with distance to have a margin that avoids b barely touching surface
-        margin = r * b.jiggle_collision_margin
-        factor = max(0, min((d.length - b.length) / (r + margin), 1))
-        r = r + margin * factor
-        print("r: %f" % r)
-
-        # could m_next collide?
-        if (d.length < b.length + r) and (
-            d.length > r
-        ):  # include no collision if bone is inside collider
-            # find collision in dir
-
-            # tangent intersect:
-            # a lot of ifs could probably be made more elegant, but works for now
-            if d.length * d.length < r * r + b.length * b.length:
-                print("along length")
-                r2 = math.asin(r / d.length)  # always positive
-
-                # the collider is "in front" of the bone
-                if d.y < 0:
-                    if d.x < 0:
-                        print("below")
-                        if dir < 0:
-                            print("neg")
-                            r1 = -math.atan(d.x / d.y) + r2
-                        else:
-                            print("pos")
-                            r1 = math.radians(360) - math.atan(d.x / d.y) - r2
-                        # r1= r1+r2
-                    else:
-                        print("above")
-                        if dir > 0:
-                            print("pos")
-                            r1 = -math.atan(d.x / d.y) - r2
-                        else:
-                            print("neg")
-                            if crossed:
-                                r1 = -math.atan(d.x / d.y) + r2
-                            else:
-                                r1 = -math.atan(d.x / d.y) + r2 - math.radians(360)
-                        # r1= r1-r2
-
-                # the collider is "behind" the bone
-                else:
-                    if d.x < 0:
-                        print("belo")  # negative
-                        if dir < 0:
-                            print("neg")
-                            r1 = -math.radians(180) - math.atan(d.x / d.y) + r2
-                        else:
-                            print("pos")
-                            r1 = math.radians(180) - math.atan(d.x / d.y) - r2
-
-                    else:
-                        print("abov")  # positive
-                        if dir > 0:
-                            print("pos")
-                            r1 = math.radians(180) - math.atan(d.x / d.y) - r2
-                        else:
-                            print("neg")
-                            if crossed:
-                                r1 = -math.atan(d.x / d.y) + r2 + math.radians(180)
-                            else:
-                                r1 = -math.atan(d.x / d.y) + r2 - math.radians(180)
-
-                # print(math.degrees(r1))
-
-            # tip intersect
-            else:
-                print("at tip")
-                # print(d)
-                # difference of squares goes here
-                r1 = -dir * math.acos(
-                    (b.length * b.length + d.length * d.length - r * r)
-                    / (2 * b.length * d.length)
-                ) - math.atan(d.x / d.y)
-                if d.y > 0:
-                    if crossed:
-                        r1 = r1 - math.radians(180) * dir
-                else:
-                    if not crossed:
-                        r1 = r1
-                # print(math.degrees(r1))
-
-            print("r1: " + str(math.degrees(r1)))
-            # if slip = 0, r1 stays the same
-            # if 0 < slip <= 1:
-            # if d_sphere.z = 0, r1 stays the same, there's no sideways direction to slip
-            # else as abs(d_sphere.z) approaches r, after r1 rotation, rotate on the spot to the tangent of the sphere, and unrotate by r1 * slip for it sliding out along the tangent
-            r_sphere = c.empty_display_size * c.scale.x
-            r1x = r1 - (
-                (1 - b.jiggle_collision_friction) * r1 * d_sphere.z * d_sphere.z
-            ) / (r_sphere * r_sphere)
-            r1z = ((1 - b.jiggle_collision_friction) * r1 * d_sphere.z * r_slice) / (
-                r_sphere * r_sphere
-            )
-
-            # verify this math works... can you just add the two rotations like this?
-            rx = r1x * math.cos(theta)
-            rz = r1x * math.sin(theta)
-            rx2 = r1z * math.sin(theta)
-            rz2 = r1z * math.cos(theta)
-            rx = rx + rx2
-            rz = rz - rz2
-
-            #            #new approach to rotation maniputation, everything is a y-rotation
-            #            #first rotate r1 to face along tangent of sphere
-            #            tangent = math.acos(d_sphere.z/r_sphere)
-            #            #slip = Euler((r1,0,0)).to_matrix().to_4x4() @ Euler((0,tangent,0)).to_matrix().to_4x4() @ Euler((-r1,0,0)).to_matrix().to_4x4()
-            #            #then rotate this euler by the original rotation to face the slice
-            #            #slip = (Euler((0,theta,0)).to_matrix().to_4x4() @ slip).to_euler()
-            #
-            #            slip = (Euler((0,theta,0)).to_matrix().to_4x4() @ Euler((r1,0,0)).to_matrix().to_4x4()).to_euler()
-            #            #now slip.x and slip.z are rx and rz
-            #            rx=slip.x
-            #            rz=slip.z
-            #
-            #            #3rd try!
-            #            slip = abs(d_sphere.z/r_sphere)
-            #            tangent = math.acos(d_sphere.z/r_sphere)
-            #            #if
-            #            new_theta = theta + tangent
-            #            print('tangent: ' + str(math.degrees(tangent)))
-            #            rx = slip*r1*math.cos(new_theta) + (1-slip)*r1*math.cos(theta)
-            #            rz = slip*r1*math.sin(new_theta) + (1-slip)*r1*math.cos(theta)
-            #            #rx=r1*math.cos(theta)
-            #            #rz=r1*math.sin(theta)
-
-            print("x: %f z: %f" % (math.degrees(rx), math.degrees(rz)))
-
-            # return appropriate value
-            d_head = math.sqrt((-d.y - b.length) * (-d.y - b.length) + d.x * d.x)
-            if crossed:
-                print("crossing collision")
-                # return Euler((0,0,r1))
-                if b["r_max"]:
-                    if abs(r1) < abs(b["r_max"]):
-                        return None
-                b["c_largest"] = c.name
-                b["r_max"] = r1
-                return Euler((-rz, 0, rx))
-
-                # rot_collision = Euler((-rz,0,rx))
-            elif (d_head < r) or (
-                (abs(d.x) < r) and (abs(d.y) < b.length) and (d.y < 0)
-            ):
-                print("collides")
-                # return Euler((0,0,r1))
-                if b["r_max"]:
-                    if abs(r1) < abs(b["r_max"]):
-                        return None
-                b["c_largest"] = c.name
-                b["r_max"] = r1
-                return Euler((-rz, 0, rx))
-
-                # rot_collision = Euler((-rz,0,rx))
-            else:
-                print("no collision happens")  # can collide but doesn't
-                # b['dir_last'] = dir_next
-                c_item.dir_last = dir_next
-                return None
-
-        if d.length < r:
-            print("base inside")
-        print("no collision possible")
-        # b['dir_last'] = dir_next
-        c_item.dir_last = dir_next
-        return None  # m_next can't collide
-    print("no r_slice")
-    return None
+        b["rot1"] = (b.id_data.matrix_world @ b.matrix).to_quaternion()
+    try:
+        test = b["t1"]
+    except:
+        b["t1"] = b.id_data.matrix_world @ b.matrix
+    try:
+        test = b["rot_col"]
+    except:
+        b["rot_col"] = None
 
 
-def jiggle_bone(b, self):
-    # global colliders
+def jiggle_bone_post(b, new_b_mat):
+    global skip_jiggle
+
+    #    rate = bpy.context.scene.render.fps/bpy.context.scene.render.fps_base/24
+    rate = bpy.context.scene.jiggle_rate
+
     # translational movement between frames in bone's >>previous<< orientation space
     vec = (
-        relative_vector(Matrix(b["jiggle_mat"]), b.id_data.matrix_world @ b.matrix) * -1
+        relative_vector(Matrix(b["jiggle_mat"]), b.id_data.matrix_world @ new_b_mat)
+        * -1
     )
     vecy = vec.y
     vec.y = 0  # y translation shouldn't affect y rotation, but store it for scaling
 
     # translational vector without any previous jiggle (and y)
     t1 = Matrix(b["t1"])
-    t2 = b.id_data.matrix_world @ b.matrix
+    t2 = b.id_data.matrix_world @ new_b_mat
     t = relative_vector(t2, t1)  # reversed so it is in the current frame's bone space?
     # ideally world space:
     t = t2.translation - t1.translation
-    # print(t)
     b["t1"] = t2
 
     # rotational input between frames
     rot1 = Quaternion(b["rot1"])
+    # rot1 = Matrix(b['jiggle_mat']).to_quaternion()
     rot2 = (b.id_data.matrix_world @ b.matrix).to_quaternion()
     delta1 = (
         rot2.to_matrix().to_4x4().inverted() @ rot1.to_matrix().to_4x4()
@@ -590,7 +666,23 @@ def jiggle_bone(b, self):
         Matrix(b["jiggle_mat"]).to_quaternion().to_matrix().to_4x4(),
         Matrix.Translation(g),
     )
+    # gvec = relative_vector(b.matrix.to_quaternion().to_matrix().to_4x4(), Matrix.Translation(g))
+    # gvec.magnitude = g.magnitude
+    # gvec.x = -0.01
     gvec.y = 0
+
+    ##### NEW JIGGLE APPROACH ATTEMPT ########
+
+    #    d = Vector(b.jiggle_spring) + vec + deltarot + gvec
+    #    k = b.jiggle_stiffness
+    #    F = -k*d
+    #    new_d = d + F*b.jiggle_dampen
+
+    #    sum_of_forces = -(Vector(b.jiggle_spring)*b.jiggle_stiffness)+vec+deltarot+gvec
+    #    b.jiggle_velocity = Vector(b.jiggle_velocity)*(1-b.jiggle_dampen) + sum_of_forces
+    #    b.jiggle_spring = Vector(b.jiggle_spring) + Vector(b.jiggle_velocity)
+
+    ######## FAILED!!!!! ###################
 
     # for rotational tension and jiggle
     # can i replace tension with just doing the jiggle spring? [yes]
@@ -600,8 +692,8 @@ def jiggle_bone(b, self):
         - Vector(b.jiggle_spring) * b.jiggle_stiffness
         + gvec * (1 - b.jiggle_stiffness)
     )
-    b.jiggle_spring = Vector(b.jiggle_spring) + Vector(
-        b.jiggle_velocity
+    b.jiggle_spring = (
+        Vector(b.jiggle_spring) + Vector(b.jiggle_velocity) / rate
     )  # physics forces if no collision
 
     # for translational tension and jiggle
@@ -610,16 +702,22 @@ def jiggle_bone(b, self):
         Vector(b.jiggle_velocity2) * (1 - b.jiggle_dampen)
         - tension2 * b.jiggle_stiffness
     )
-    b.jiggle_spring2 = tension2 + Vector(b.jiggle_velocity2)
+    b.jiggle_spring2 = tension2 + Vector(b.jiggle_velocity2) / rate
     # can this all be calculated/stored variables in world space, and then converted to bone space?
     local_spring = (
         t2.to_quaternion().to_matrix().to_4x4().inverted()
         @ Matrix.Translation(b.jiggle_spring2)
     )
-    # print(local_spring.translation)
 
-    # first frame should not consider any previous frame
-    if bpy.context.scene.frame_current == bpy.context.scene.frame_start:
+    # first frame or inactive should not consider any previous frame
+    if (
+        (
+            (bpy.context.scene.frame_current == bpy.context.scene.frame_start)
+            and bpy.context.scene.jiggle_reset
+        )
+        or skip_jiggle
+        or not b.jiggle_active
+    ):
         vec = Vector((0, 0, 0))
         vecy = 0
         deltarot = Vector((0, 0, 0))
@@ -630,6 +728,8 @@ def jiggle_bone(b, self):
         b.jiggle_velocity2 = Vector((0, 0, 0))
         b.jiggle_spring2 = Vector((0, 0, 0))
         tension2 = Vector((0, 0, 0))
+        local_spring = Matrix.Identity(4)
+
         b["rot_col"] = Euler((0, 0, 0))
         b["dir_last"] = None
     #        b['d_last'] = None
@@ -638,172 +738,227 @@ def jiggle_bone(b, self):
     # this is rotation if there was no collision
     eulerRot = Euler(
         (
-            math.radians(Vector(b.jiggle_spring).z * -b.jiggle_amplitude),
-            math.radians(Vector(b.jiggle_spring).y * -b.jiggle_amplitude),
-            math.radians(Vector(b.jiggle_spring).x * +b.jiggle_amplitude),
+            math.radians(Vector(b.jiggle_spring).z * -b.jiggle_amplitude * rate),
+            math.radians(Vector(b.jiggle_spring).y * -b.jiggle_amplitude * rate),
+            math.radians(Vector(b.jiggle_spring).x * +b.jiggle_amplitude * rate),
         )
     )
-
     # translation matrix
-    trans = Matrix.Translation(local_spring.translation * b.jiggle_translation)
+    if not b.bone.use_connect:
+        trans = Matrix.Translation(local_spring.translation * b.jiggle_translation)
+    else:
+        trans = Matrix.Identity(4)
     # print(trans.translation)
 
-    # if this works, properly store array of current influence values to re-apply
-    c_influence = []
-    if b.constraints:
-        for c in b.constraints:
-            # store current value here
-            c_influence.append(c.influence)
-            c.influence = 0
-        bpy.context.view_layer.update()
+    #    #COLLISIONS!!!
 
-    # COLLISIONS!!!
+    #    b["r_max"] = None
+    #    rot_collision = None
+    #    b["c_largest"] = None
+    #
+    #    #too many else's, once @trans is solved, just make a rot_collision identity matrix for no collision case
+    #    if b.jiggle_collision:
+    #        for c_item in b.jiggle_collider_list:
+    #            if bpy.context.scene.objects.find(c_item.name) >= 0:
+    #                collision_test = collide_bone(c_item, b, eulerRot)
+    #                if collision_test:
+    #                    rot_collision = collision_test
+    #            else: #collider has disappeared from jiggle list, recalculate
+    #                jiggle_list_refresh_ui(self,bpy.context)
+    #
+    #        if rot_collision:
+    #            print(b["c_largest"])
+    #            b.jiggle_spring = Vector(b.jiggle_spring) + Vector((rot_collision.z,0,-rot_collision.x))
+    #            b.jiggle_velocity = Vector(b.jiggle_velocity) *0 #this needs to reflect off surface normal
+    #            #b.jiggle_velocity = 4*Vector((rot_collision.z,0,-rot_collision.x))
+    #            new_mat = b.matrix @ eulerRot.to_matrix().to_4x4() @ rot_collision.to_matrix().to_4x4()
+    #            #new_mat = b.matrix @ trans @ eulerRot.to_matrix().to_4x4()
+    #        else:
+    #            new_mat = update_matrix @ b.matrix @ trans @ eulerRot.to_matrix().to_4x4()
+    #
+    #        print(" ") #just to break up readout between frames
+    #
+    #    else:
 
-    b["r_max"] = None
-    rot_collision = None
-    b["c_largest"] = None
+    # this is a scale multiplier on keyed bones, but need to account for jiggle pre state
+    s = 1 + (local_spring.translation.y * b.jiggle_stretch)
+    s_mat = Matrix.Scale(s, 4, Vector((0, 1, 0)))
 
-    # too many else's, once @trans is solved, just make a rot_collision identity matrix for no collision case
-    if b.jiggle_collision:
-        for c_item in b.jiggle_collider_list:
-            if bpy.context.scene.objects.find(c_item.name) >= 0:
-                collision_test = collide_bone(c_item, b, eulerRot)
-                if collision_test:
-                    rot_collision = collision_test
-            else:  # collider has disappeared from jiggle list, recalculate
-                jiggle_list_refresh_ui(self, bpy.context)
+    new_mat = b.matrix @ trans @ eulerRot.to_matrix().to_4x4() @ s_mat
 
-        if rot_collision:
-            print(b["c_largest"])
-            b.jiggle_spring = Vector(b.jiggle_spring) + Vector(
-                (rot_collision.z, 0, -rot_collision.x)
-            )
-            b.jiggle_velocity = (
-                Vector(b.jiggle_velocity) * 0
-            )  # this needs to reflect off surface normal
-            # b.jiggle_velocity = 4*Vector((rot_collision.z,0,-rot_collision.x))
+    for c in b.constraints:
+        if c.type == "CHILD_OF" and not c.mute:
             new_mat = (
-                b.matrix
-                @ eulerRot.to_matrix().to_4x4()
-                @ rot_collision.to_matrix().to_4x4()
+                b.bone.matrix_local @ b.matrix_basis @ b.matrix.inverted() @ new_mat
             )
-            # new_mat = b.matrix @ trans @ eulerRot.to_matrix().to_4x4()
-        else:
-            new_mat = b.matrix @ trans @ eulerRot.to_matrix().to_4x4()
-
-        print(" ")  # just to break up readout between frames
-
-    else:
-        new_mat = b.matrix @ trans @ eulerRot.to_matrix().to_4x4()
+            break
 
     b.matrix = new_mat
-    b.scale.y = b.scale.y * (1 - vecy * b.jiggle_stretch)
 
-    for i, c in enumerate(b.constraints):
-        # restore current value here
-        c.influence = c_influence[i]
+    # this becomes the new previous frame matrix: (this one needs parent updates in new_b_mat, where above uses pre-parent b.matrix)
+    new_mat = new_b_mat @ trans @ eulerRot.to_matrix().to_4x4() @ s_mat
+    b["jiggle_mat"] = b.id_data.matrix_world @ new_mat
 
-    bpy.context.view_layer.update()  # update to benefit bones down the heirarchy
+    return new_mat
 
-    # this becomes the new previous frame matrix:
-    b["jiggle_mat"] = b.id_data.matrix_world @ b.matrix
+
+# new tree based jiggle logic
+def jiggle_tree_pre(jiggle_tree, ob=None):
+    if bpy.context.scene.jiggle_enable:
+        for item in jiggle_tree:
+            if "bones" in jiggle_tree[item]:
+                # process objects
+                if item in bpy.data.objects:
+                    jiggle_tree_pre(jiggle_tree[item]["bones"], bpy.data.objects[item])
+                    jiggle_tree_pre(jiggle_tree[item]["children"])
+                else:
+                    generate_jiggle_tree()
+            else:
+                # process bones
+                if item in ob.pose.bones:
+                    b = ob.pose.bones[item]
+                    jiggle_bone_pre(b)
+                    jiggle_tree_pre(jiggle_tree[item]["children"], ob)
+                else:
+                    generate_jiggle_tree()
+
+
+# post assumes pre has ensured jiggle tree items exist?
+def jiggle_tree_post2(jiggle_tree, ob=None, parent=None, new_parent_mat=None):
+    global skip_jiggle
+    if bpy.context.scene.jiggle_enable:
+
+        if bpy.context.scene.jiggle_use_fps_scale:
+            bpy.context.scene.jiggle_rate = (
+                bpy.context.scene.render.fps
+                / bpy.context.scene.render.fps_base
+                / bpy.context.scene.jiggle_base_fps
+            )
+        else:
+            bpy.context.scene.jiggle_rate = 1.0
+
+        for item in jiggle_tree:
+            if "bones" in jiggle_tree[item]:
+                jiggle_tree_post2(jiggle_tree[item]["bones"], bpy.data.objects[item])
+                jiggle_tree_post2(jiggle_tree[item]["children"])
+            else:
+                b = ob.pose.bones[item]
+                if parent:  # b's matrix should be offset by parent offset if it has one
+                    diff_mat = (
+                        b.matrix.inverted() @ parent.matrix
+                    ).inverted()  # b and parent are both pre-jiggle (no view_layer updates)
+                    new_b_mat = new_parent_mat @ diff_mat
+                else:
+                    new_b_mat = b.matrix
+                new_p_mat = jiggle_bone_post(
+                    b, new_b_mat
+                )  # jiggle_bone_post should be updated to do all calcs on new_b_mat
+                jiggle_tree_post2(jiggle_tree[item]["children"], ob, b, new_p_mat)
+                if (
+                    (
+                        (
+                            bpy.context.scene.frame_current
+                            == bpy.context.scene.frame_start
+                        )
+                        and bpy.context.scene.jiggle_reset
+                    )
+                    or skip_jiggle
+                    or not b.jiggle_enable
+                ):  # if not jiggle enabled, it not it the list so this seems pointless?
+                    b["jiggle_mat"] = b.id_data.matrix_world @ b.matrix
+
+
+def reset_jiggle_tree(jiggle_tree, ob=None):
+    if bpy.context.scene.jiggle_enable:
+        for item in jiggle_tree:
+            if "bones" in jiggle_tree[item]:
+                # process objects
+                if item in bpy.data.objects:
+                    reset_jiggle_tree(
+                        jiggle_tree[item]["bones"], bpy.data.objects[item]
+                    )
+                    reset_jiggle_tree(jiggle_tree[item]["children"])
+                else:
+                    generate_jiggle_tree()
+            else:
+                # process bones
+                if item in ob.pose.bones:
+                    b = ob.pose.bones[item]
+                    reset_bone(b)
+                    reset_jiggle_tree(jiggle_tree[item]["children"], ob)
+                else:
+                    generate_jiggle_tree()
 
 
 @persistent
-def jiggle_bone_pre(self):
-    global render
-    if not render:
-        if bpy.context.scene.jiggle_enable:
-            for item in bpy.context.scene.jiggle_list:
-                if bpy.data.objects.find(item.name) >= 0:
-                    ob = bpy.data.objects[item.name]
-                    if ob.type == "ARMATURE":  # and ob.data.jiggle_enable:
-                        for item2 in ob.jiggle_list:
-                            if ob.pose.bones.find(item2.name) >= 0:
-                                b = ob.pose.bones[item2.name]
-                                if b.jiggle_enable:
-                                    b.scale.y = 1
-                                    if b.rotation_mode == "QUATERNION":
-                                        try:
-                                            b.rotation_quaternion = Euler(
-                                                b["rot_start"]
-                                            ).to_quaternion()
-                                        except:
-                                            b[
-                                                "rot_start"
-                                            ] = b.rotation_quaternion.copy().to_euler()
-                                    else:
-                                        try:
-                                            b.rotation_euler = Euler(b["rot_start"])
-                                        except:
-                                            b["rot_start"] = b.rotation_euler.copy()
-                                    if b.jiggle_translation != 0:
-                                        try:
-                                            b.location = b["loc_start"]
-                                        except:
-                                            b["loc_start"] = b.location
-                                    try:
-                                        test = b["rot1"]
-                                    except:
-                                        b["rot1"] = (
-                                            b.id_data.matrix_world @ b.matrix
-                                        ).to_quaternion()
-                                    try:
-                                        test = b["t1"]
-                                    except:
-                                        b["t1"] = b.id_data.matrix_world @ b.matrix
-                                    try:
-                                        test = b["rot_col"]
-                                    except:
-                                        b["rot_col"] = None
-                            else:  # bone has disappeared from scene jiggle list; recalculate
-                                jiggle_list_refresh_ui(self, bpy.context)
-                else:  # object has disappeared from scene jiggle list, recalculate
-                    jiggle_list_refresh_ui(self, bpy.context)
+def jiggle_pre(self):
+    global curframe
+
+    try:
+        jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
+    except:
+        generate_jiggle_tree()
+        jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
+
+    jiggle_tree_pre(jiggle_tree)
 
 
 @persistent
-def jiggle_bone_post(self):
+def jiggle_post(self, depsgraph):
+    global curframe
     global render
-    if not render:
-        # print(bpy.context.scene.frame_current)
-        # global colliders
-        # jiggle the relevant bones
-        if bpy.context.scene.jiggle_enable:
-            for item in bpy.context.scene.jiggle_list:
-                if bpy.data.objects.find(item.name) >= 0:
-                    ob = bpy.data.objects[item.name]
-                    if ob.type == "ARMATURE":  # and ob.data.jiggle_enable:
-                        for item2 in ob.jiggle_list:
-                            if ob.pose.bones.find(item2.name) >= 0:
-                                b = ob.pose.bones[item2.name]
-                                if b.jiggle_enable:
-                                    jiggle_bone(b, self)
-                                    print(b.rotation_quaternion)
-                                    b["jigg"] = b.matrix.copy()
-                                    # grab copy of matrix on late update of first frame (prevents freakouts on loop)
-                                    if (
-                                        bpy.context.scene.frame_current
-                                        == bpy.context.scene.frame_start
-                                    ):
-                                        b["jiggle_mat"] = (
-                                            b.id_data.matrix_world @ b.matrix
-                                        )
-        # store 'last' matrix for all colliders
-        for c in bpy.context.scene.jiggle_collider_list:
-            c = bpy.context.scene.objects[c.name]
-            c["last"] = c.matrix_world.copy()
-    # print("jiggle post complete")
+    global skip_handler
+    global skip_jiggle
+    # print("%s %s" %(depsgraph.view_layer.name, bpy.context.view_layer.name))
+    if skip_handler:
+        return
+    skip_handler = True
+    if depsgraph.view_layer.name == bpy.context.view_layer.name:
+        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+        if (
+            bpy.context.screen.is_animation_playing
+            and curframe
+            and (abs(bpy.context.scene.frame_current - curframe) > 10)
+        ):
+            if (
+                abs(bpy.context.scene.frame_current - curframe)
+                > (bpy.context.scene.frame_end - bpy.context.scene.frame_start - 10)
+            ) and not bpy.context.scene.jiggle_reset:
+                print("looping")
+                skip_jiggle = False
+            else:
+                skip_jiggle = True
+                print("anim drop")
+        elif (
+            (bpy.context.screen.is_animation_playing == False)
+            and curframe
+            and (bpy.context.scene.frame_current != curframe + 1)
+        ):
+            skip_jiggle = True
+            # print('scrubbing')
+        else:
+            skip_jiggle = False
+            # print('jiggling')
+            # print(bpy.context.screen.is_animation_playing)
+
+        curframe = bpy.context.scene.frame_current
+        # print("post %d %d" %(curframe, bpy.context.scene.frame_current))
+
+        jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
+        jiggle_tree_post2(jiggle_tree)
+    skip_handler = False
+
+
+######## NEW STUFF ENDS #######################################################################
 
 
 @persistent
 def jiggle_render(self):
     global render
-    # print("jiggle render!")
-    # jiggle_bone_pre(self)
-    # jiggle_bone_post(self)
-    # f = bpy.context.scene.frame_current
-    # bpy.context.scene.frame_set(f)
+    print("render triggered frame %d" % bpy.context.scene.frame_current)
+    # bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+    # bpy.context.view_layer.update()
     render = True
 
 
@@ -811,6 +966,51 @@ def jiggle_render(self):
 def render_post(self):
     global render
     render = False
+
+
+def select_bones(bone_tree, ob):
+    for bone in bone_tree:
+        ob.pose.bones[bone].bone.select = True
+        select_bones(bone_tree[bone]["children"], ob)
+
+
+class reset_wiggle(bpy.types.Operator):
+    """Reset wiggle physics"""
+
+    bl_idname = "id.reset_wiggle"
+    bl_label = "Reset Physics State"
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
+        reset_jiggle_tree(jiggle_tree)
+        return {"FINISHED"}
+
+
+class select_wiggle_bones(bpy.types.Operator):
+    """Select wiggle bones in this armature"""
+
+    bl_idname = "id.select_wiggle"
+    bl_label = "Select Wiggle Bones"
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.object is not None
+            and context.object.type == "ARMATURE"
+            and context.mode == "POSE"
+        )
+
+    def execute(self, context):
+        bpy.ops.pose.select_all(action="DESELECT")
+        ob = context.object
+        jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
+        if ob.name in jiggle_tree:
+            select_bones(jiggle_tree[ob.name]["bones"], ob)
+        return {"FINISHED"}
 
 
 class bake_jiggle(bpy.types.Operator):
@@ -825,18 +1025,37 @@ class bake_jiggle(bpy.types.Operator):
 
     def execute(self, context):
         ob = context.object
-        # push active action into nla
-        bpy.context.area.type = "NLA_EDITOR"
-        bpy.ops.nla.action_pushdown(channel_index=1)
-        # set animation slot to additive
-        ob.animation_data.action_blend_type = "ADD"
+        if context.scene.jiggle_bake_additive:
+            if ob.animation_data:
+                if ob.animation_data.action:
+                    action = ob.animation_data.action
+                    track = ob.animation_data.nla_tracks.new()
+                    track.strips.new(action.name, action.frame_range[0], action)
+                    ob.animation_data.action = None
+            else:
+                ob.animation_data.create()
+                ob.animation_data.use_nla = True
+            ob.animation_data.action_blend_type = "ADD"
+        else:
+            if ob.animation_data:
+                ob.animation_data.action_blend_type = "REPLACE"
+
+        if not context.scene.jiggle_reset:
+            # prewarm loop
+            for frame in range(context.scene.frame_start, context.scene.frame_end):
+                context.scene.frame_set(frame)
+                if frame == context.scene.frame_start:
+                    bpy.ops.id.reset_wiggle()
+
         # bake bones - start to end, active bones, don't clear constraints
         bpy.ops.nla.bake(
-            frame_start=context.scene.frame_start, frame_end=context.scene.frame_end
+            frame_start=context.scene.frame_start,
+            frame_end=context.scene.frame_end,
+            visual_keying=True,
         )
+
         # turn off dynamics according to bpy.context.scene.jiggle_disable_mask
         mask = context.scene.jiggle_disable_mask
-        # context.object.data.jiggle_enable = False
         if mask == "BONES":
             for b in bpy.context.selected_pose_bones:
                 b.jiggle_enable = False
@@ -860,13 +1079,13 @@ class JiggleBonePanel(bpy.types.Panel):
     @classmethod
     def poll(cls, context):
         return (
-            context.object is not None
+            context.object
             and context.object.type == "ARMATURE"
-            and context.mode == "POSE"
+            and context.object.data.bones.active
         )
 
     def draw_header(self, context):
-        b = context.active_pose_bone
+        b = context.object.pose.bones[context.object.data.bones.active.name]
         self.layout.prop(b, "jiggle_enable", text="")
         self.layout.enabled = (
             context.object.data.jiggle_enable and context.scene.jiggle_enable
@@ -874,14 +1093,19 @@ class JiggleBonePanel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        b = context.active_pose_bone
+        b = context.object.pose.bones[context.object.data.bones.active.name]
         # layout.prop(b, 'jiggle_enable')
-        layout.enabled = (
+        layout.use_property_split = True
+
+        col = layout.column()
+        col.enabled = (
             b.jiggle_enable
             and context.object.data.jiggle_enable
             and context.scene.jiggle_enable
         )
-        col = layout.column()
+
+        col.prop(b, "jiggle_active")
+        col = col.column()
         if not context.object.data.jiggle_enable:
             col.label(text="ARMATURE DISABLED.")
             # col.label(text="See Armature Settings.")
@@ -893,15 +1117,25 @@ class JiggleBonePanel(bpy.types.Panel):
         col.prop(b, "jiggle_translation")
         col.prop(b, "jiggle_stretch")
         col.prop(b, "jiggle_gravity")
-        # col.enabled = b.jiggle_enable
-        layout.prop(b, "jiggle_collision")
-        col = layout.column()
+        col = col.column()
+        col.enabled = False
+        col.prop(b, "jiggle_collision", text="Collisions disabled during beta.")
+        # col.enabled = b.jiggle_active
+        # col = col.column()
         col.prop(b, "jiggle_collision_margin")
         col.prop(b, "jiggle_collision_friction")
         col.enabled = b.jiggle_collision
         layout.separator()
-        layout.operator("id.bake_wiggle")
-        layout.prop(context.scene, "jiggle_disable_mask")
+
+        col = layout.column()
+        col.label(text="Global Wiggle Utilities:")
+        col.operator("id.reset_wiggle")
+        col.prop(context.scene, "jiggle_reset")
+        col.separator()
+        col.operator("id.select_wiggle")
+        col.operator("id.bake_wiggle")
+        layout.prop(context.scene, "jiggle_bake_additive")
+        layout.prop(context.scene, "jiggle_disable_mask", text="Bake disables wiggle:")
 
 
 class JiggleScenePanel(bpy.types.Panel):
@@ -916,6 +1150,13 @@ class JiggleScenePanel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.use_property_split = True
+        col = layout.column()
+        col.prop(context.scene, "jiggle_reset")
+        col.prop(context.scene, "jiggle_use_fps_scale")
+        col = col.column()
+        col.prop(context.scene, "jiggle_base_fps")
+        col.enabled = context.scene.jiggle_use_fps_scale
 
 
 #        layout.prop(context.scene, 'jiggle_enable')
@@ -979,6 +1220,8 @@ def register():
     bpy.utils.register_class(JiggleArmaturePanel)
     bpy.utils.register_class(JiggleColliderPanel)
     bpy.utils.register_class(bake_jiggle)
+    bpy.utils.register_class(reset_wiggle)
+    bpy.utils.register_class(select_wiggle_bones)
 
     bpy.types.PoseBone.jiggle_spring = bpy.props.FloatVectorProperty(
         default=Vector((0, 0, 0))
@@ -998,8 +1241,25 @@ def register():
         name="Enabled:",
         description="Global toggle for all jiggle bones",
         default=True,
-        update=jiggle_list_refresh_ui,
+        update=update_tree,
     )
+    bpy.types.Scene.jiggle_reset = bpy.props.BoolProperty(
+        name="Reset on Loop",
+        description="Jiggle physics reset when looping playback",
+        default=True,
+    )
+    bpy.types.Scene.jiggle_use_fps_scale = bpy.props.BoolProperty(
+        name="Frame Rate Scaling",
+        description="Physics rate scales to match frame rate",
+        default=False,
+    )
+    bpy.types.Scene.jiggle_base_fps = bpy.props.FloatProperty(
+        name="Base Frame Rate",
+        description="The physics frame rate to match",
+        default=24.0,
+    )
+    bpy.types.Scene.jiggle_rate = bpy.props.FloatProperty(name="Rate", default=1.0)
+
     mask_enum = [
         ("SCENE", "Scene", "scene mask"),
         ("ARMATURE", "Armature", "armature mask"),
@@ -1011,11 +1271,17 @@ def register():
         default="BONES",
         description="What to disable after baking",
     )
+
+    bpy.types.Scene.jiggle_bake_additive = bpy.props.BoolProperty(
+        name="Additive Bake:",
+        description="Push any current action to NLA and create additive jiggle on top",
+        default=True,
+    )
     bpy.types.Armature.jiggle_enable = bpy.props.BoolProperty(
         name="Enabled:",
         description="Toggle Dynamic jiggle bones on this armature",
         default=True,
-        update=jiggle_list_refresh_ui,
+        update=update_tree,
     )
     bpy.types.Scene.jiggle_list = bpy.props.CollectionProperty(type=jiggle_bone_item)
     bpy.types.Scene.jiggle_collider_list = bpy.props.CollectionProperty(
@@ -1033,9 +1299,15 @@ def register():
     )
     bpy.types.PoseBone.jiggle_enable = bpy.props.BoolProperty(
         name="Enabled",
-        description="Activate as jiggle bone",
+        description="Enable jiggle on this bone",
         default=False,
         update=jiggle_list_refresh_ui,
+    )
+    bpy.types.PoseBone.jiggle_active = bpy.props.BoolProperty(
+        name="Active",
+        description="Animate this toggle to temporarily disable jiggle",
+        default=True,
+        update=active_update,
     )
     bpy.types.PoseBone.jiggle_dampen = bpy.props.FloatProperty(
         name="Dampening:",
@@ -1097,8 +1369,8 @@ def register():
     #    bpy.app.handlers.render_pre.clear()
     #    bpy.app.handlers.render_post.clear()
 
-    bpy.app.handlers.frame_change_pre.append(jiggle_bone_pre)
-    bpy.app.handlers.frame_change_post.append(jiggle_bone_post)
+    bpy.app.handlers.frame_change_pre.append(jiggle_pre)
+    bpy.app.handlers.frame_change_post.append(jiggle_post)
     bpy.app.handlers.render_pre.append(jiggle_render)
     bpy.app.handlers.render_post.append(render_post)
 
@@ -1112,9 +1384,11 @@ def unregister():
     bpy.utils.unregister_class(jiggle_collider_item)
 
     bpy.utils.unregister_class(bake_jiggle)
+    bpy.utils.unregister_class(select_wiggle_bones)
+    bpy.utils.unregister_class(reset_wiggle)
 
-    bpy.app.handlers.frame_change_pre.remove(jiggle_bone_pre)
-    bpy.app.handlers.frame_change_post.remove(jiggle_bone_post)
+    bpy.app.handlers.frame_change_pre.remove(jiggle_pre)
+    bpy.app.handlers.frame_change_post.remove(jiggle_post)
     bpy.app.handlers.render_pre.remove(jiggle_render)
     bpy.app.handlers.render_post.remove(render_post)
 
@@ -1122,33 +1396,58 @@ def unregister():
 if __name__ == "__main__":
     register()
 
-# 1.4.3 CHANGELOG
+# 1.4.4 CHANGELOG
 
-# bugfix: context.object is 'None' when queried from properties panel
+# bugfix: translational jiggle not reset on startframe
+# bugfix: bake operator didn't like channel index specified
+# feature: active toggle useful for animating a preroll without jiggle
+# feature: operator to select other enabled wiggle bones in armature
+# feature: frame rate scaling of jiggle physics
+# feature: looping physics toggle
+
+# 1.5 CHANGELOG
+
+# optimization: speedup by avoiding view_layer.updates()
+
+# bone stretching now properly matches jiggle dampening (it was always fully damped before)
+
+# constraint logic:
+#   matrix logic modified when presence of 'CHILD_OF' constraint detected.
+#   note that constraint order makes a big difference in terms of whether things work. Eg:
+#       -maintain volume must come after child of or it'll freak out
+#       -track to must come before child of or results will be weird
+
+# cleanup: cleared out some old code, much remains!
+
+# b12:
+# scale respects initial scale when jiggle enabled
+# post bake disabling shouldn't mess up bone enabled states anymore
+# additive is optional when baking wiggle
 
 # TODO
-#   -stabilize/verify f12 renders
-#   -should only disable baked bones?
 
-# for 1.4:
+#   -jiggle_tree needs to be a better stored variable
+#   -can constraints still get passed jiggle motion? (tricky order of operation, maybe only childof?) [KINDA DONE]
+
+# NEXT PRIORITIES
+
+#   -investigate why renders don't work
+#   -should only disable baked bones?
+#   -y-stretch should jiggle [DONE]
+#   -make sure y-stretch works with preserve volume constraint [DONE - with caveats]
+
+# FUTURE COLLISION STUFF
 
 #   -better collision margin (fake bone extension)
 #   -collision bounce/velocity transfer
 #   -look into division by zero (i think in friction code)
 #   -look into frictions that seem to still pull bones incorrectly
 #   -make collision work with stretchy bones and amplitude jiggle
-
-
-# for 1.5:
-
-# per bone collider collection option
-# box collider for better torso/ponytail collision scenarios
-# stretched sphere colliders? capsule colliders?
-# y-stretch should jiggle
-# y-stretch should squash and stretch
+#   -per bone collider collection option
+#   -box collider for better torso/ponytail collision scenarios
+#   -stretched sphere colliders? capsule colliders?
 
 # lower priority:
 # cleaner code for property updates (one function for multiple properties)
-# performance tweak: only do context.update() on bones that have children
 # look into property groupings again (we're already using for c_items, right?)
 # any other cleanups

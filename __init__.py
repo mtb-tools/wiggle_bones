@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Wiggle Bone",
     "author": "Steve Miller",
-    "version": (1, 5, 0),
+    "version": (1, 5, 1),
     "blender": (2, 80, 0),
     "location": "Properties > Bone",
     "description": "Simulates simple jiggle physics on bones",
@@ -17,9 +17,6 @@ import json
 
 skip = False
 render = False
-curframe = None
-skip_jiggle = False
-skip_handler = False
 
 ######## NEW STUFF STARTS ############################################
 # Consider replacing generic python object with an actual node that doesn't need to be converted to dict on each access:
@@ -628,7 +625,6 @@ def jiggle_bone_pre(b):
 
 
 def jiggle_bone_post(b, new_b_mat):
-    global skip_jiggle
 
     #    rate = bpy.context.scene.render.fps/bpy.context.scene.render.fps_base/24
     rate = bpy.context.scene.jiggle_rate
@@ -711,13 +707,9 @@ def jiggle_bone_post(b, new_b_mat):
 
     # first frame or inactive should not consider any previous frame
     if (
-        (
-            (bpy.context.scene.frame_current == bpy.context.scene.frame_start)
-            and bpy.context.scene.jiggle_reset
-        )
-        or skip_jiggle
-        or not b.jiggle_active
-    ):
+        (bpy.context.scene.frame_current == bpy.context.scene.frame_start)
+        and bpy.context.scene.jiggle_reset
+    ) or not b.jiggle_active:
         vec = Vector((0, 0, 0))
         vecy = 0
         deltarot = Vector((0, 0, 0))
@@ -825,7 +817,6 @@ def jiggle_tree_pre(jiggle_tree, ob=None):
 
 # post assumes pre has ensured jiggle tree items exist?
 def jiggle_tree_post2(jiggle_tree, ob=None, parent=None, new_parent_mat=None):
-    global skip_jiggle
     if bpy.context.scene.jiggle_enable:
 
         if bpy.context.scene.jiggle_use_fps_scale:
@@ -855,16 +846,9 @@ def jiggle_tree_post2(jiggle_tree, ob=None, parent=None, new_parent_mat=None):
                 )  # jiggle_bone_post should be updated to do all calcs on new_b_mat
                 jiggle_tree_post2(jiggle_tree[item]["children"], ob, b, new_p_mat)
                 if (
-                    (
-                        (
-                            bpy.context.scene.frame_current
-                            == bpy.context.scene.frame_start
-                        )
-                        and bpy.context.scene.jiggle_reset
-                    )
-                    or skip_jiggle
-                    or not b.jiggle_enable
-                ):  # if not jiggle enabled, it not it the list so this seems pointless?
+                    (bpy.context.scene.frame_current == bpy.context.scene.frame_start)
+                    and bpy.context.scene.jiggle_reset
+                ) or not b.jiggle_enable:  # if not jiggle enabled, it not it the list so this seems pointless?
                     b["jiggle_mat"] = b.id_data.matrix_world @ b.matrix
 
 
@@ -892,62 +876,18 @@ def reset_jiggle_tree(jiggle_tree, ob=None):
 
 @persistent
 def jiggle_pre(self):
-    global curframe
-
     try:
         jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
     except:
         generate_jiggle_tree()
         jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
-
     jiggle_tree_pre(jiggle_tree)
 
 
 @persistent
-def jiggle_post(self, depsgraph):
-    global curframe
-    global render
-    global skip_handler
-    global skip_jiggle
-    # print("%s %s" %(depsgraph.view_layer.name, bpy.context.view_layer.name))
-    if skip_handler:
-        return
-    skip_handler = True
-    if depsgraph.view_layer.name == bpy.context.view_layer.name:
-        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
-
-        if (
-            bpy.context.screen.is_animation_playing
-            and curframe
-            and (abs(bpy.context.scene.frame_current - curframe) > 10)
-        ):
-            if (
-                abs(bpy.context.scene.frame_current - curframe)
-                > (bpy.context.scene.frame_end - bpy.context.scene.frame_start - 10)
-            ) and not bpy.context.scene.jiggle_reset:
-                print("looping")
-                skip_jiggle = False
-            else:
-                skip_jiggle = True
-                print("anim drop")
-        elif (
-            (bpy.context.screen.is_animation_playing == False)
-            and curframe
-            and (bpy.context.scene.frame_current != curframe + 1)
-        ):
-            skip_jiggle = True
-            # print('scrubbing')
-        else:
-            skip_jiggle = False
-            # print('jiggling')
-            # print(bpy.context.screen.is_animation_playing)
-
-        curframe = bpy.context.scene.frame_current
-        # print("post %d %d" %(curframe, bpy.context.scene.frame_current))
-
-        jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
-        jiggle_tree_post2(jiggle_tree)
-    skip_handler = False
+def jiggle_post(self):
+    jiggle_tree = bpy.context.scene["jiggle_tree"].to_dict()
+    jiggle_tree_post2(jiggle_tree)
 
 
 ######## NEW STUFF ENDS #######################################################################
@@ -956,9 +896,6 @@ def jiggle_post(self, depsgraph):
 @persistent
 def jiggle_render(self):
     global render
-    print("render triggered frame %d" % bpy.context.scene.frame_current)
-    # bpy.context.scene.frame_set(bpy.context.scene.frame_current)
-    # bpy.context.view_layer.update()
     render = True
 
 
@@ -1030,10 +967,10 @@ class bake_jiggle(bpy.types.Operator):
                 if ob.animation_data.action:
                     action = ob.animation_data.action
                     track = ob.animation_data.nla_tracks.new()
-                    track.strips.new(action.name, action.frame_range[0], action)
+                    track.strips.new(action.name, int(action.frame_range[0]), action)
                     ob.animation_data.action = None
             else:
-                ob.animation_data.create()
+                ob.animation_data_create()
                 ob.animation_data.use_nla = True
             ob.animation_data.action_blend_type = "ADD"
         else:
